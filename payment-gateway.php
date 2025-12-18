@@ -1,5 +1,7 @@
 <?php
 
+use Ramsey\Uuid\Uuid;
+
 /**
  * Plugin Name: FooPay
  * Plugin URI:  https://admin-stage.payment-controller.com
@@ -307,20 +309,71 @@ function foopay_init_gateway_class()
 		// Method that processes the payment
 		function process_payment($order_id)
 		{
-			global $woocommerce;
-			$order = new WC_Order($order_id);
+			$order = wc_get_order($order_id);
 
-			// Mark as on-hold (we're awaiting the cheque)
-			$order->update_status('on-hold', __('Awaiting cheque payment', 'woocommerce'));
-
-			// Remove cart
-			$woocommerce->cart->empty_cart();
-
-			// Return thankyou redirect
-			return array(
-				'result' => 'success',
-				'redirect' => $this->get_return_url($order)
+			$body = array(
+				'referenceId' => Uuid::uuid4()->toString(),
+				'amount' => $order->get_total(),
+				'returnUrl' => wc_get_page_permalink('shop'),
+				'autoCapture' => true,
+				'currency' => $order->get_currency(),
+				'registerAutoPayment' => false,
+				'fraudPolicyId' => $order->get_currency(),
+				'currency' => $order->get_currency(),
+				'currency' => $order->get_currency(),
+				'currency' => $order->get_currency(),
+				'currency' => $order->get_currency(),
+				'currency' => $order->get_currency(),
 			);
+
+			// 3) درخواست به API با wp_remote_post
+			$api_url = $this->get_option('api_url');
+			$api_key = $this->get_option('api_key');
+
+			$args = array(
+				'timeout' => 30,
+				'headers' => array(
+					'Content-Type' => 'application/json',
+					'Authorization' => 'Bearer ' . $api_key, // اگر API شما توکن می‌خواهد
+				),
+				'body' => wp_json_encode($body),
+			);
+
+			$response = wp_remote_post($api_url, $args);
+
+
+			if (200 === wp_remote_retrieve_response_code($response)) {
+
+				$body = json_decode(wp_remote_retrieve_body($response), true);
+
+				// it could be different depending on your payment processor
+				if ('APPROVED' === $body['response']['responseCode']) {
+
+					// we received the payment
+					$order->payment_complete();
+					$order->reduce_order_stock();
+
+					// some notes to customer (replace true with false to make it private)
+					$order->add_order_note('Hey, your order is paid! Thank you!', true);
+
+					// Empty cart
+					WC()->cart->empty_cart();
+
+					// Redirect to the thank you page
+					return array(
+						'result' => 'success',
+						'redirect' => $this->get_return_url($order),
+					);
+
+				} else {
+					wc_add_notice('Please try again.', 'error');
+					return;
+				}
+
+			} else {
+				wc_add_notice('Connection error.', 'error');
+				return;
+			}
 
 		}
 
