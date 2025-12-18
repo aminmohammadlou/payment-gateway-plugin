@@ -1,13 +1,14 @@
 <?php
-/*
+
+/**
  * Plugin Name: FooPay
- * Plugin URI: https://admin-stage.payment-controller.com
- * Description: A simple gateway to handle your payments.
- * Author: AM10
- * Version: 1
+ * Plugin URI:  https://admin-stage.payment-controller.com
+ * Author:      FooPay
+ * Description: A simple gateway to handle your payments
+ * Version:     1.0.0
  */
 
-// Add gateway to wc payment gateways
+// Add FooPay to WC payment gateways
 add_filter('woocommerce_payment_gateways', 'foopay_add_gateway_class');
 function foopay_add_gateway_class($gateways)
 {
@@ -15,82 +16,90 @@ function foopay_add_gateway_class($gateways)
 	return $gateways;
 }
 
-// Set settings oof plugin
+// Initialize FooPay plugin
 add_action('plugins_loaded', 'foopay_init_gateway_class');
-
-/**
- * Helper: send JSON error and terminate.
- */
-function foopay_send_json_error($code = 'error', $message = 'Error', $status = 400)
-{
-	$payload = array('error' => $code, 'message' => $message);
-	wp_send_json($payload, $status);
-}
-
-
 function foopay_init_gateway_class()
 {
 	class FooPay_Gateway extends WC_Payment_Gateway
 	{
+		protected string $foopay_panel_url = "https://admin-stage.payment-controller.com/auth/signin";
+		protected string $foopay_api_url = "https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net";
+		protected string $app_id;
+		protected bool $setup_completed;
+		protected string $bot_token;
+
 		public function __construct()
 		{
 			$this->id = 'foopay';
-			$this->has_fields = false; // in case you need a custom credit card form
+			$this->has_fields = false; // In case you need a custom credit card form
 			$this->method_title = 'FooPay';
-			$this->method_description = 'A simple gateway to handle your payments.'; // will be displayed on the options page
+			$this->method_description = 'A simple gateway to handle your payments';
 
-			// gateways can support subscriptions, refunds, saved payment methods,
-			// but in this tutorial we begin with simple payments
+			// Gateways can support subscriptions, refunds, saved payment methods
 			$this->supports = array(
 				'products'
 			);
 
-			// Method with all the options fields
 			$this->init_form_fields();
+			$this->init_settings(); // Load the settings
 
-			// Load the settings
-			$this->init_settings();
 			$this->app_id = $this->get_option('app_id');
-			$this->authorization_code = $this->get_option('foopay_authorization_code');
+			$this->setup_completed = $this->get_option('setup_completed');
+			$this->bot_token = $this->get_option('bot_token');
 			$this->title = $this->get_option('title');
 			$this->description = $this->get_option('description');
 			$this->enabled = $this->get_option('enabled');
-			$this->testmode = 'yes' === $this->get_option('testmode');
-			$this->private_key = $this->testmode ? $this->get_option('test_private_key') : $this->get_option('private_key');
-			$this->publishable_key = $this->testmode ? $this->get_option('test_publishable_key') : $this->get_option('publishable_key');
 
-			// This action hook saves the settings
+			// Hook for saving settings
 			add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
+
+			// Hooks for handling setup and webhooks
+			add_action('woocommerce_api_foopay_setup', array($this, 'foopay_setup_handler'));
+			add_action('woocommerce_api_payment_webhook', array($this, 'payment_webhook_handler'));
+
+			// Admin notice on successful setup
+			add_action('admin_notices', function () {
+				if (
+					isset($_GET['foopay_setup']) &&
+					$_GET['foopay_setup'] === 'success'
+				) {
+					?>
+					<div class="notice notice-success is-dismissible">
+						<p><strong>FooPay:</strong> Setup completed successfully.</p>
+					</div>
+					<?php
+				}
+			});
 		}
-		/**
-		 * Plugin options
-		 */
+
+		// Plugin options
 		public function init_form_fields()
 		{
 			$saved_settings = get_option('woocommerce_' . $this->id . '_settings', array());
-			$panel_url = get_option('foopay_panel_url', '');
-			$code = get_option('foopay_authorization_code', '');
-			$return_url = (is_ssl() ? 'https://' : 'http://') . $_SERVER['HTTP_HOST'] . '/?wc-api=foopay_setup';
 			$app_id = $saved_settings['app_id'];
-			$setup_disabled = empty($app_id);
-			$setup_url = $panel_url . '?returnUrl=' . urlencode($return_url) . '&appId=' . urlencode($app_id) . '&grantAuthorization=' . urlencode('true');
-			$setup_button_html = $setup_disabled
+			$setup_completed = $saved_settings['setup_completed'];
+			$setup_button_disabled = empty($app_id) || $setup_completed;
+
+			$return_url = home_url('/?wc-api=foopay_setup');
+			$setup_url = $this->foopay_panel_url . '?returnUrl=' . urlencode($return_url) . '&appId=' . urlencode($app_id) . '&grantAuthorization=' . urlencode('true');
+
+			$setup_button_html = $setup_button_disabled
 				? '<button class="button button-primary" disabled>Setup</button>'
-				: '<a href="' . esc_url($setup_url) . '" target="_blank" class="button button-primary">Setup</a>';
+				: '<a href="' . esc_url($setup_url) . '" class="button button-primary" target=_blank>Setup</a>';
 
 			$this->form_fields = array(
 				'setup_button' => array(
 					'title' => 'Setup status',
-					'label' => $setup_button_html,
 					'type' => 'checkbox',
-					'description' => 'You should set App ID first to enter setup proccess.<br>Once you click this, you will be redirected to FooPay to complete the setup process.',
-					'default' => 'no',
-					'disabled' => true
+					'label' => $setup_button_html,
+					'disabled' => true,
+					'default' => 'yes',
+					'description' => $setup_completed ? 'Setup completed successfully ✅' : 'You should set App ID to enter setup proccess.<br>Once you click on button, you will be redirected to FooPay to complete the setup process.',
 				),
 				'app_id' => array(
 					'title' => 'App ID',
 					'type' => 'text',
-					'description' => 'Your ID to set in FooPay.',
+					'description' => 'Your App ID to set in FooPay.',
 					'custom_attributes' => array('required' => 'required'),
 					'default' => ''
 				),
@@ -105,31 +114,238 @@ function foopay_init_gateway_class()
 					'type' => 'textarea',
 					'description' => 'This controls the description which the user sees during checkout.',
 					'default' => 'Simply pay via our payment gateway.',
-				),
-				'testmode' => array(
-					'title' => 'Test mode',
-					'label' => 'Enable Test Mode',
-					'type' => 'checkbox',
-					'description' => 'Place the payment gateway in test mode using test API keys.',
-					'default' => 'no',
-				),
-				'test_publishable_key' => array(
-					'title' => 'Test Publishable Key',
-					'type' => 'text'
-				),
-				'test_private_key' => array(
-					'title' => 'Test Private Key',
-					'type' => 'password',
-				),
-				'publishable_key' => array(
-					'title' => 'Live Publishable Key',
-					'type' => 'text'
-				),
-				'private_key' => array(
-					'title' => 'Live Private Key',
-					'type' => 'password'
-				),
+				)
 			);
+		}
+
+		protected function foopay_setup_handler()
+		{
+			// Read params
+			$authorizationCode_raw = isset($_GET['authorizationCode']) ? wp_unslash($_GET['authorizationCode']) : '';
+			$appId_raw = isset($_GET['appId']) ? wp_unslash($_GET['appId']) : '';
+
+			// Validate params
+			if (empty($authorizationCode_raw)) {
+				$this->foopay_render_admin_error_page(
+					'missing_authorizationCode',
+					'authorizationCode parameter is required'
+				);
+			}
+
+			if (empty($appId_raw) || $appId_raw !== $this->app_id) {
+				$this->foopay_render_admin_error_page(
+					'wrong_appId',
+					'appId parameter is wrong'
+				);
+			}
+
+			// Get bot token
+			$bot_token = $this->foopay_exchange_authorization_code_for_bot_token(
+				sanitize_text_field($authorizationCode_raw),
+				$appId_raw
+			);
+
+			if (is_wp_error($bot_token)) {
+				$this->foopay_render_admin_error_page(
+					'error_token',
+					'Error in exchanging authorization code for token'
+				);
+			}
+
+			// Set payment webhook in payment service
+			$webhook_url = home_url('/?wc-api=payment_webhook');
+			$webhook_token = $this->webhook_token_generator();
+
+			$payload = [
+				'paymentWebhookUrl' => [
+					'value' => $webhook_url
+				],
+				'webhookAuthorizationHeaderScheme' => [
+					'value' => 'Bearer'
+				],
+				'webhookAuthorizationHeaderParameter' => [
+					'value' => $webhook_token
+				]
+			];
+
+			$response = wp_remote_request(
+				$this->foopay_api_url . '/api/apps/' . $this->app_id,
+				[
+					'method' => 'PATCH',
+					'headers' => [
+						'Content-Type' => 'application/json',
+						'Authorization' => 'Bearer ' . $bot_token,
+					],
+					'body' => wp_json_encode($payload),
+					'timeout' => 20,
+				]
+			);
+
+			if (is_wp_error($response)) {
+				$this->foopay_render_admin_error_page(
+					'error_webhook',
+					'Error in setting webhook URL'
+				);
+			}
+
+			// Save bot token and mark setup as completed
+			$option_key = 'woocommerce_' . $this->id . '_settings';
+			$settings = get_option($option_key, array());
+
+			if (!is_array($settings)) {
+				$settings = array();
+			}
+
+			$settings['bot_token'] = sanitize_text_field($bot_token);
+			$settings['setup_completed'] = true;
+
+			// Save updated settings back to DB
+			update_option($option_key, $settings);
+
+			$redirect_url = add_query_arg(
+				array(
+					'foopay_setup' => 'success',
+				),
+				admin_url('admin.php?page=wc-settings&tab=checkout&section=' . $this->id)
+			);
+
+			wp_safe_redirect($redirect_url);
+			exit;
+		}
+
+		protected function foopay_exchange_authorization_code_for_bot_token($authorization_code, $app_id)
+		{
+			// Validate input
+			if (empty($authorization_code) || empty($app_id)) {
+				return new WP_Error(
+					'missing_authorization_code_or_app_id',
+					'Authorization code or App ID is missing'
+				);
+			}
+
+			// Call FooPay API to exchange code for token
+			$response = wp_remote_post(
+				$this->foopay_api_url . '/api/apps/' . $app_id . '/generate-bot-token',
+				array(
+					'timeout' => 20,
+					'headers' => array(
+						'Authorization' => 'Bearer ' . $authorization_code,
+						'Accept' => 'text/plain',
+					),
+				)
+			);
+
+			if (is_wp_error($response)) {
+				return $response;
+			}
+
+			$status_code = wp_remote_retrieve_response_code($response);
+			$body = wp_remote_retrieve_body($response);
+
+			if ($status_code !== 200) {
+				return new WP_Error(
+					'foopay_token_error',
+					'Token request failed',
+					array(
+						'status' => $status_code,
+						'body' => $body,
+					)
+				);
+			}
+
+			$token = trim($body);
+
+			if (empty($token)) {
+				return new WP_Error(
+					'empty_token',
+					'Token response was empty'
+				);
+			}
+
+			return $token;
+		}
+
+		protected function webhook_token_generator()
+		{
+			$option_key = 'woocommerce_' . $this->id . '_settings';
+			$settings = get_option($option_key, array());
+
+			if (!is_array($settings)) {
+				$settings = array();
+			}
+
+			$webhook_token = $settings['webhook_token'];
+
+			if (!$webhook_token) {
+				$webhook_token = wp_generate_password(64, false, false);
+				update_option($option_key, $settings);
+			}
+
+			return $webhook_token;
+		}
+
+		public function payment_webhook_handler()
+		{
+			echo 'OK';
+			exit;
+		}
+
+		protected function foopay_render_admin_error_page($code, $message)
+		{
+			status_header(400);
+			nocache_headers();
+
+			?>
+			<!DOCTYPE html>
+			<html>
+
+			<head>
+				<meta charset="utf-8">
+				<title>FooPay Error</title>
+				<?php wp_admin_css('install', true); ?>
+				<style>
+					body {
+						background: #f0f0f1;
+					}
+
+					.foopay-error {
+						max-width: 600px;
+						margin: 80px auto;
+						background: #fff;
+						padding: 30px;
+						border-left: 4px solid #d63638;
+					}
+
+					pre {
+						background: #f6f7f7;
+						padding: 12px;
+						overflow: auto;
+					}
+				</style>
+			</head>
+
+			<body>
+				<div class="foopay-error">
+					<h1>Something went wrong</h1>
+					<p>Please call plugin admin.</p>
+
+					<h3>Error details</h3>
+					<pre><?php
+					echo esc_html(wp_json_encode(
+						array(
+							'error' => $code,
+							'message' => $message,
+							'status' => 400,
+						),
+						JSON_PRETTY_PRINT
+					));
+					?></pre>
+				</div>
+			</body>
+
+			</html>
+			<?php
+			exit;
 		}
 
 		/*
@@ -212,55 +428,4 @@ function foopay_init_gateway_class()
 
 		// }
 	}
-}
-
-register_activation_hook(__FILE__, 'foopay_activation');
-function foopay_activation()
-{
-	$FOOPAY_PANEL_URL = 'https://admin-stage.payment-controller.com/auth/signin';
-	$FOOPAY_APP_URL = 'https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net';
-
-	// sanitize before saving
-	if (filter_var($FOOPAY_PANEL_URL, FILTER_VALIDATE_URL) && filter_var($FOOPAY_APP_URL, FILTER_VALIDATE_URL)) {
-		// use a unique option name that won't collide with WC settings
-		add_option('foopay_panel_url', $FOOPAY_PANEL_URL, '', 'no');
-		add_option('foopay_app_url', $FOOPAY_PANEL_URL, '', 'no');
-	}
-}
-
-add_action('woocommerce_api_test', 'test_endpoint_handler');
-
-function test_endpoint_handler()
-{
-	echo 'hello';
-	$gateway_id = 'foopay';
-
-	// Read params
-	$authorizationCode_raw = isset($_GET['authorizationCode']) ? wp_unslash($_GET['authorizationCode']) : '';
-
-	// Basic validation
-	if (empty($authorizationCode_raw)) {
-		foopay_send_json_error('missing_authorizationCode', 'authorizationCode parameter is required', 400);
-	}
-
-	// Fetch existing gateway settings (so we won't clobber them)
-	$option_key = 'woocommerce_' . $gateway_id . '_settings';
-	$settings = get_option($option_key, array());
-
-	if (!is_array($settings)) {
-		$settings = array();
-	}
-
-	// mark the setup checkbox as checked
-	$settings['setup_button'] = 'yes';
-
-	add_option('foopay_authorization_code', $authorizationCode_raw, '', 'no');
-
-	// Save updated settings back to DB
-	update_option($option_key, $settings);
-
-	// Return success response (JSON)
-	wp_send_json_success(array(
-		'message' => 'FooPay setup values saved successfully.',
-	), 200);
 }
