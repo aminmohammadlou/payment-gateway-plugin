@@ -8,6 +8,22 @@
  * Version:     1.0.0
  */
 
+add_action('before_woocommerce_init', function () {
+	if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
+		// Enable block checkout + HPOS compatibility
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility(
+			'cart_checkout_blocks',
+			__FILE__,
+			true
+		);
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility(
+			'custom_order_tables',
+			__FILE__,
+			true
+		);
+	}
+});
+
 // Add FooPay to WC payment gateways
 add_filter('woocommerce_payment_gateways', 'foopay_add_gateway_class');
 function foopay_add_gateway_class($gateways)
@@ -15,6 +31,23 @@ function foopay_add_gateway_class($gateways)
 	$gateways[] = 'FooPay_Gateway';
 	return $gateways;
 }
+
+add_action('woocommerce_blocks_loaded', function () {
+
+	if (!class_exists('WC_Foopay_Blocks')) {
+		require_once plugin_dir_path(__FILE__) . 'includes/class-wc-foopay-gateway-blocks-support.php';
+	}
+
+	add_action('woocommerce_blocks_payment_method_type_registration', function ($registry) {
+		if (
+			class_exists('\\Automattic\\WooCommerce\\Blocks\\Payments\\PaymentMethodRegistry') &&
+			class_exists('\\Automattic\\WooCommerce\\Blocks\\Payments\\Integrations\\AbstractPaymentMethodType')
+		) {
+
+			$registry->register(new WC_Foopay_Blocks());
+		}
+	});
+});
 
 // Initialize FooPay plugin
 add_action('plugins_loaded', 'foopay_init_gateway_class');
@@ -36,9 +69,9 @@ function foopay_init_gateway_class()
 			$this->method_description = 'A simple gateway to handle your payments';
 
 			// Gateways can support subscriptions, refunds, saved payment methods
-			$this->supports = array(
-				'products'
-			);
+			// $this->supports = array(
+			// 	'products'
+			// );
 
 			$this->init_form_fields();
 			$this->init_settings(); // Load the settings
@@ -88,13 +121,19 @@ function foopay_init_gateway_class()
 				: '<a href="' . esc_url($setup_url) . '" class="button button-primary" target=_blank>Setup</a>';
 
 			$this->form_fields = array(
+				'enabled' => array(
+					'title' => 'Enable/Disable',
+					'type' => 'checkbox',
+					'label' => 'Enable FooPay',
+					'default' => 'yes'
+				),
 				'setup_button' => array(
 					'title' => 'Setup status',
 					'type' => 'checkbox',
 					'label' => $setup_button_html,
 					'disabled' => true,
 					'default' => 'yes',
-					'description' => $setup_completed ? 'Setup completed successfully ✅' : 'You should set App ID to enter setup proccess.<br>Once you click on button, you will be redirected to FooPay to complete the setup process.',
+					'description' => $setup_completed ? 'Setup completed successfully ✅' : 'You should set App ID to enter setup process.<br>Once you click on button, you will be redirected to FooPay to complete the setup process.',
 				),
 				'app_id' => array(
 					'title' => 'App ID',
@@ -265,6 +304,32 @@ function foopay_init_gateway_class()
 			return $token;
 		}
 
+		// Method that processes the payment
+		function process_payment($order_id)
+		{
+			global $woocommerce;
+			$order = new WC_Order($order_id);
+
+			// Mark as on-hold (we're awaiting the cheque)
+			$order->update_status('on-hold', __('Awaiting cheque payment', 'woocommerce'));
+
+			// Remove cart
+			$woocommerce->cart->empty_cart();
+
+			// Return thankyou redirect
+			return array(
+				'result' => 'success',
+				'redirect' => $this->get_return_url($order)
+			);
+
+		}
+
+		public function payment_webhook_handler()
+		{
+			echo 'OK';
+			exit;
+		}
+
 		protected function webhook_token_generator()
 		{
 			$option_key = 'woocommerce_' . $this->id . '_settings';
@@ -277,17 +342,11 @@ function foopay_init_gateway_class()
 			$webhook_token = $settings['webhook_token'];
 
 			if (!$webhook_token) {
-				$webhook_token = wp_generate_password(64, false, false);
+				$webhook_token = wp_generate_password(64, false);
 				update_option($option_key, $settings);
 			}
 
 			return $webhook_token;
-		}
-
-		public function payment_webhook_handler()
-		{
-			echo 'OK';
-			exit;
 		}
 
 		protected function foopay_render_admin_error_page($code, $message)
@@ -297,7 +356,7 @@ function foopay_init_gateway_class()
 
 			?>
 			<!DOCTYPE html>
-			<html>
+			<html lang="en">
 
 			<head>
 				<meta charset="utf-8">
@@ -347,85 +406,5 @@ function foopay_init_gateway_class()
 			<?php
 			exit;
 		}
-
-		/*
-		 * We're processing the payments here
-		 */
-		public function process_payment($order_id)
-		{
-
-			// we need it to get any order detailes
-			$order = wc_get_order($order_id);
-
-			$return_url = '';
-
-			$body = array(
-				'amount' => $order->get_total(),
-				'currency' => $order->get_currency(),
-				'order_id' => $order_id,
-				'customer_email' => $order->get_billing_email(),
-				'return_url' => $return_url,
-				// ... هر فیلد دیگری که API شما می‌خواهد
-			);
-
-			// 3) درخواست به API با wp_remote_post
-			$api_url = $this->get_option('api_url');
-			$api_key = $this->get_option('api_key');
-
-			$args = array(
-				'timeout' => 30,
-				'headers' => array(
-					'Content-Type' => 'application/json',
-					'Authorization' => 'Bearer ' . $api_key, // اگر API شما توکن می‌خواهد
-				),
-				'body' => wp_json_encode($body),
-			);
-
-			$response = wp_remote_post($api_url, $args);
-
-
-			if (200 === wp_remote_retrieve_response_code($response)) {
-
-				$body = json_decode(wp_remote_retrieve_body($response), true);
-
-				// it could be different depending on your payment processor
-				if ('APPROVED' === $body['response']['responseCode']) {
-
-					// we received the payment
-					$order->payment_complete();
-					$order->reduce_order_stock();
-
-					// some notes to customer (replace true with false to make it private)
-					$order->add_order_note('Hey, your order is paid! Thank you!', true);
-
-					// Empty cart
-					WC()->cart->empty_cart();
-
-					// Redirect to the thank you page
-					return array(
-						'result' => 'success',
-						'redirect' => $this->get_return_url($order),
-					);
-
-				} else {
-					wc_add_notice('Please try again.', 'error');
-					return;
-				}
-
-			} else {
-				wc_add_notice('Connection error.', 'error');
-				return;
-			}
-
-		}
-
-		/*
-		 * In case you need a webhook, like PayPal IPN etc
-		 */
-		// public function webhook() {
-
-		// ...
-
-		// }
 	}
 }
