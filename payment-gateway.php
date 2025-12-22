@@ -58,7 +58,8 @@ function foopay_init_gateway_class()
 	class FooPay_Gateway extends WC_Payment_Gateway
 	{
 		protected string $foopay_panel_url = "https://admin-stage.payment-controller.com/auth/signin";
-		protected string $foopay_api_url = "https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net";
+		protected string $foopay_payment_app_url = "https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net";
+		protected string $foopay_payment_api_url = "https://api-stage.payment-controller.com";
 		protected string $app_id;
 		protected bool $setup_completed;
 		protected string $bot_token;
@@ -159,7 +160,7 @@ function foopay_init_gateway_class()
 			);
 		}
 
-		protected function foopay_setup_handler()
+		public function foopay_setup_handler()
 		{
 			// Read params
 			$authorizationCode_raw = isset($_GET['authorizationCode']) ? wp_unslash($_GET['authorizationCode']) : '';
@@ -210,7 +211,7 @@ function foopay_init_gateway_class()
 			];
 
 			$response = wp_remote_request(
-				$this->foopay_api_url . '/api/apps/' . $this->app_id,
+				$this->foopay_payment_app_url . '/api/apps/' . $this->app_id,
 				[
 					'method' => 'PATCH',
 					'headers' => [
@@ -266,7 +267,7 @@ function foopay_init_gateway_class()
 
 			// Call FooPay API to exchange code for token
 			$response = wp_remote_post(
-				$this->foopay_api_url . '/api/apps/' . $app_id . '/generate-bot-token',
+				$this->foopay_payment_app_url . '/api/apps/' . $app_id . '/generate-bot-token',
 				array(
 					'timeout' => 20,
 					'headers' => array(
@@ -310,71 +311,53 @@ function foopay_init_gateway_class()
 		function process_payment($order_id)
 		{
 			$order = wc_get_order($order_id);
+			$customer_id = $order->get_customer_id();
 
 			$body = array(
-				'referenceId' => Uuid::uuid4()->toString(),
+				'referenceId' => "$order_id",
 				'amount' => $order->get_total(),
-				'returnUrl' => wc_get_page_permalink('shop'),
+				'currency' => $order->get_currency(),
 				'autoCapture' => true,
-				'currency' => $order->get_currency(),
-				'registerAutoPayment' => false,
-				'fraudPolicyId' => $order->get_currency(),
-				'currency' => $order->get_currency(),
-				'currency' => $order->get_currency(),
-				'currency' => $order->get_currency(),
-				'currency' => $order->get_currency(),
-				'currency' => $order->get_currency(),
+				'webhookUrl' => home_url('/?wc-api=payment_webhook'),
+				'returnUrl' => wc_get_page_permalink('shop'),
+				'customerOrder' => [
+					'customer' => [
+						'customerId' => $customer_id > 0 ? "$customer_id" : Uuid::uuid4()->toString(),
+						'email' => $order->get_billing_email(),
+					]
+				]
 			);
-
-			// 3) درخواست به API با wp_remote_post
-			$api_url = $this->get_option('api_url');
-			$api_key = $this->get_option('api_key');
 
 			$args = array(
 				'timeout' => 30,
 				'headers' => array(
 					'Content-Type' => 'application/json',
-					'Authorization' => 'Bearer ' . $api_key, // اگر API شما توکن می‌خواهد
+					'Authorization' => 'Bearer ' . $this->bot_token,
 				),
 				'body' => wp_json_encode($body),
 			);
 
-			$response = wp_remote_post($api_url, $args);
+			$response = wp_remote_post($this->foopay_payment_api_url . '/api/v1/apps/' . $this->app_id . '/payments/hosted-page', $args);
 
-
-			if (200 === wp_remote_retrieve_response_code($response)) {
+			if (201 === wp_remote_retrieve_response_code($response)) {
 
 				$body = json_decode(wp_remote_retrieve_body($response), true);
 
-				// it could be different depending on your payment processor
-				if ('APPROVED' === $body['response']['responseCode']) {
+				$redirect_url = $body['redirectUrl'];
 
-					// we received the payment
-					$order->payment_complete();
-					$order->reduce_order_stock();
+				$order->update_status('pending-payment', 'Pending payment in FooPay.');
+				$order->reduce_order_stock();
 
-					// some notes to customer (replace true with false to make it private)
-					$order->add_order_note('Hey, your order is paid! Thank you!', true);
+				WC()->cart->empty_cart();
 
-					// Empty cart
-					WC()->cart->empty_cart();
-
-					// Redirect to the thank you page
-					return array(
-						'result' => 'success',
-						'redirect' => $this->get_return_url($order),
-					);
-
-				} else {
-					wc_add_notice('Please try again.', 'error');
-					return;
-				}
-
+				return array(
+					'result' => 'success',
+					'redirect' => $redirect_url,
+				);
 			} else {
 				wc_add_notice('Connection error.', 'error');
 				return;
 			}
-
 		}
 
 		public function payment_webhook_handler()
