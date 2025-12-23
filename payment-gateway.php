@@ -336,7 +336,7 @@ function foopay_init_gateway_class()
 				'currency' => $order->get_currency(),
 				'autoCapture' => true,
 				'webhookUrl' => home_url('/?wc-api=payment_webhook'),
-				'returnUrl' => wc_get_page_permalink('shop'),
+				'returnUrl' => $this->get_return_url($order),
 				'customerOrder' => [
 					'customer' => [
 						'customerId' => $customer_id > 0 ? "$customer_id" : Uuid::uuid4()->toString(),
