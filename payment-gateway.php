@@ -55,6 +55,10 @@ add_action('woocommerce_blocks_loaded', function () {
 add_action('plugins_loaded', 'foopay_init_gateway_class');
 function foopay_init_gateway_class()
 {
+	if (!class_exists('WC_Payment_Gateway')) {
+		return;
+	}
+
 	class FooPay_Gateway extends WC_Payment_Gateway
 	{
 		protected string $foopay_panel_url = "https://admin-stage.payment-controller.com/auth/signin";
@@ -115,6 +119,7 @@ function foopay_init_gateway_class()
 			$saved_settings = get_option('woocommerce_' . $this->id . '_settings', array());
 			$app_id = $saved_settings['app_id'] ?? '';
 			$bot_token = $saved_settings['bot_token'] ?? '';
+
 			$setup_completed = !(empty($app_id)) && !(empty($bot_token));
 
 			$setup_button_html = $setup_completed
@@ -301,6 +306,30 @@ function foopay_init_gateway_class()
 			$order = wc_get_order($order_id);
 			$customer_id = $order->get_customer_id();
 
+			$this->log('Starting payment request', 'info', [
+				'order_id' => $order->get_id(),
+			]);
+
+
+			$items = [];
+
+			foreach ($order->get_items() as $item) {
+				/** @var WC_Order_Item_Product $item */
+				$product = $item->get_product();
+
+				$items[] = [
+					'name' => $item->get_name(),
+					'description' => $product ? $product->get_short_description() : '',
+					'amount' => (float) $order->get_item_total($item, false),
+					'quantity' => (int) $item->get_quantity(),
+					'tax' => (float) $order->get_item_tax($item),
+					'sku' => $product ? $product->get_sku() : '',
+					'category' => $product && $product->is_virtual()
+						? 'DigitalGoods'
+						: 'PhysicalGoods',
+				];
+			}
+
 			$body = array(
 				'referenceId' => "$order_id",
 				'amount' => $order->get_total(),
@@ -311,10 +340,43 @@ function foopay_init_gateway_class()
 				'customerOrder' => [
 					'customer' => [
 						'customerId' => $customer_id > 0 ? "$customer_id" : Uuid::uuid4()->toString(),
+						'accountCreatedTime' => $order->get_date_created()
+							? $order->get_date_created()->date('c')
+							: null,
+						'firstName' => $order->get_billing_first_name(),
+						'lastName' => $order->get_billing_last_name(),
 						'email' => $order->get_billing_email(),
+						'phoneNumber' => $order->get_billing_phone(),
+						'mobileNumber' => $order->get_billing_phone(),
+						'address' => [
+							'streetAddressLine1' => $order->get_billing_address_1(),
+							'streetAddressLine2' => $order->get_billing_address_2(),
+							'zipCode' => $order->get_billing_postcode(),
+							'city' => $order->get_billing_city(),
+							'state' => $order->get_billing_state(),
+							'country' => WC()->countries->countries[$order->get_billing_country()] ?? '',
+							'countryCode' => $order->get_billing_country(),
+						],
+						'orderId' => "$order_id",
+						'description' => sprintf('Order #%s from %s', $order->get_id(), get_bloginfo('name')),
+						'customId' => (string) $order->get_order_key(),
+						'amount' => [
+							'total' => (float) $order->get_total(),
+							'handling' => 0,
+							'insurance' => 0,
+							'discount' => (float) $order->get_total_discount(),
+							'shipping' => (float) $order->get_shipping_total(),
+							'shippingDiscount' => 0,
+							'totalTax' => (float) $order->get_total_tax(),
+						],
+						'items' => $items
 					]
 				]
 			);
+
+			$this->log('check payment body', 'info', [
+				'body' => $body
+			]);
 
 			$args = array(
 				'timeout' => 30,
@@ -326,6 +388,12 @@ function foopay_init_gateway_class()
 			);
 
 			$response = wp_remote_post($this->foopay_payment_api_url . '/api/v1/apps/' . $this->app_id . '/payments/hosted-page', $args);
+
+			$this->log('Sent create payment request', 'info', [
+				'response_code' => wp_remote_retrieve_response_code($response),
+				'body' => json_decode(wp_remote_retrieve_body($response)),
+
+			]);
 
 			if (201 === wp_remote_retrieve_response_code($response)) {
 
@@ -429,6 +497,20 @@ function foopay_init_gateway_class()
 			</html>
 			<?php
 			exit;
+		}
+
+		protected function log($message, $level = 'info', $context = [])
+		{
+			if (!isset($this->logger)) {
+				$this->logger = wc_get_logger();
+			}
+
+			$context = array_merge(
+				['source' => 'foopay'], // IMPORTANT
+				$context
+			);
+
+			$this->logger->log($level, $message, $context);
 		}
 	}
 }
