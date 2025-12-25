@@ -108,6 +108,9 @@ function foopay_init_gateway_class()
 					<?php
 				}
 			});
+
+			// Handles payment state and order status on order received (thank you) page
+			add_action('woocommerce_thankyou', array($this, 'thankyou_page_handler'));
 		}
 
 		// Plugin options
@@ -159,8 +162,13 @@ function foopay_init_gateway_class()
 		public function foopay_setup_handler()
 		{
 			// Read params
-			$authorizationCode = isset($_GET['authorizationCode']) ? wp_unslash($_GET['authorizationCode']) : '';
 			$appId = isset($_GET['appId']) ? wp_unslash($_GET['appId']) : '';
+			$authorizationCode = isset($_GET['authorizationCode']) ? wp_unslash($_GET['authorizationCode']) : '';
+
+			$this->log('Starting setup process', 'info', [
+				'app_id' => $appId,
+				'authorization_code' => $authorizationCode
+			]);
 
 			// Validate params
 			if (empty($authorizationCode) || empty($appId)) {
@@ -190,8 +198,8 @@ function foopay_init_gateway_class()
 
 			if (is_wp_error($bot_token)) {
 				$this->foopay_render_admin_error_page(
-					'error_token',
-					'Error in exchanging authorization code for token'
+					$bot_token->get_error_code(),
+					$bot_token->get_error_message()
 				);
 				exit;
 			}
@@ -202,7 +210,7 @@ function foopay_init_gateway_class()
 
 			// Set payment webhook in payment service
 			$webhook_url = home_url('/?wc-api=payment_webhook');
-			$webhook_token = $this->webhook_token_generator();
+			$webhook_token = $this->webhook_token_generator($option_key, $settings);
 
 			$payload = [
 				'paymentWebhookUrl' => [
@@ -229,10 +237,17 @@ function foopay_init_gateway_class()
 				]
 			);
 
-			if (is_wp_error($response)) {
+			$status_code = wp_remote_retrieve_response_code($response);
+			$body = wp_remote_retrieve_body($response);
+
+			if (is_wp_error($response) || $status_code !== 200) {
+				$this->log('Error in setting webhook URL', 'error', [
+					'status_code' => $status_code,
+					'body' => $body
+				]);
 				$this->foopay_render_admin_error_page(
-					'error_webhook',
-					'Error in setting webhook URL'
+					$response->get_error_code(),
+					$response->get_error_message()
 				);
 				exit;
 			}
@@ -250,13 +265,9 @@ function foopay_init_gateway_class()
 
 		protected function foopay_exchange_authorization_code_for_bot_token($authorization_code, $app_id)
 		{
-			// Validate input
-			if (empty($authorization_code) || empty($app_id)) {
-				return new WP_Error(
-					'missing_authorization_code_or_app_id',
-					'Authorization code or App ID is missing'
-				);
-			}
+			$this->log('Starting exchange authorization code for bot token', 'info', [
+				'authorization_code' => $authorization_code,
+			]);
 
 			// Call FooPay API to exchange code for token
 			$response = wp_remote_post(
@@ -270,34 +281,33 @@ function foopay_init_gateway_class()
 				)
 			);
 
-			if (is_wp_error($response)) {
-				return $response;
-			}
-
 			$status_code = wp_remote_retrieve_response_code($response);
 			$body = wp_remote_retrieve_body($response);
 
-			if ($status_code !== 200) {
+			if (is_wp_error($response) || $status_code !== 200) {
+				$this->log('Error in  exchange authorization code for bot token', 'error', [
+					'status_code' => $status_code,
+					'body' => $body
+				]);
 				return new WP_Error(
-					'foopay_token_error',
-					'Token request failed',
-					array(
-						'status' => $status_code,
-						'body' => $body,
-					)
+					'Error in  exchange authorization code for bot token',
+					$body
 				);
 			}
 
-			$token = trim($body);
+			$bot_token = trim($body);
 
-			if (empty($token)) {
+			if (empty($bot_token)) {
+				$this->log('Invalid bot token', 'error', [
+					'message' => 'Bot token is empty'
+				]);
 				return new WP_Error(
-					'empty_token',
-					'Token response was empty'
+					'Invalid bot token',
+					'Bot token is empty'
 				);
 			}
 
-			return $token;
+			return $bot_token;
 		}
 
 		// Method that processes the payment
@@ -306,11 +316,9 @@ function foopay_init_gateway_class()
 			$order = wc_get_order($order_id);
 			$customer_id = $order->get_customer_id();
 
-			$this->log('Starting payment request', 'info', [
-				'order_id' => $order->get_id(),
-			]);
+			$this->log('Starting payment process. order_id: ' . $order_id, 'info');
 
-
+			// Generate request body
 			$items = [];
 
 			foreach ($order->get_items() as $item) {
@@ -374,10 +382,6 @@ function foopay_init_gateway_class()
 				]
 			);
 
-			$this->log('check payment body', 'info', [
-				'body' => $body
-			]);
-
 			$args = array(
 				'timeout' => 30,
 				'headers' => array(
@@ -389,29 +393,28 @@ function foopay_init_gateway_class()
 
 			$response = wp_remote_post($this->foopay_payment_api_url . '/api/v1/apps/' . $this->app_id . '/payments/hosted-page', $args);
 
-			$this->log('Sent create payment request', 'info', [
-				'response_code' => wp_remote_retrieve_response_code($response),
-				'body' => json_decode(wp_remote_retrieve_body($response)),
+			$staus_code = wp_remote_retrieve_response_code($response);
+			$body = json_decode(wp_remote_retrieve_body($response), true);
 
-			]);
-
-			if (201 === wp_remote_retrieve_response_code($response)) {
-
-				$body = json_decode(wp_remote_retrieve_body($response), true);
-
+			if ($staus_code === 201) {
+				$this->log('Payment created successfully', 'info', [
+					'status_code' => $staus_code,
+					'body' => $body
+				]);
 				$redirect_url = $body['redirectUrl'];
 
-				$order->update_status('pending-payment', 'Pending payment in FooPay.');
-				$order->reduce_order_stock();
-
-				WC()->cart->empty_cart();
+				$order->update_status('on-hold', 'Pending payment in FooPay.');
 
 				return array(
 					'result' => 'success',
 					'redirect' => $redirect_url,
 				);
 			} else {
-				wc_add_notice('Connection error.', 'error');
+				$this->log('Error in creating payment in Foopay', 'error', [
+					'status_code' => $staus_code,
+					'body' => $body
+				]);
+				wc_add_notice('Error in payment process', 'Call admin for support.');
 				return;
 			}
 		}
@@ -422,19 +425,87 @@ function foopay_init_gateway_class()
 			exit;
 		}
 
-		protected function webhook_token_generator()
+		protected function payment_state_handler($order_status, $payment_state)
 		{
-			$option_key = 'woocommerce_' . $this->id . '_settings';
-			$settings = get_option($option_key, array());
-
-			if (!is_array($settings)) {
-				$settings = array();
+			if ($order_status === 'completed' || $order_status === 'cancelled' || $order_status === 'refunded' || $order_status === 'failed' || $order_status === 'processing') {
+				return $order_status;
 			}
 
-			$webhook_token = $settings['webhook_token'];
+			switch ($payment_state) {
+				case 'Created':
+				case 'Authorized':
+				case 'Authorizing':
+				case 'Approved':
+				case 'Capturing':
+				case 'SaleInProgress':
+				case 'ProviderAuthorizedHold':
+				case 'Cancelling':
+				case 'CapturedHold':
+				case 'Refunding':
+					return 'on-hold';
 
-			if (!$webhook_token) {
+				case 'Captured':
+					return 'processing';
+
+				case 'Failed':
+				case 'Disputed':
+					return 'failed';
+
+				case 'Refunded':
+					return 'refunded';
+
+				default:
+					return $order_status;
+			}
+		}
+
+		public function thankyou_page_handler($order_id)
+		{
+			$order = wc_get_order($order_id);
+			$order_status = $order->get_status();
+
+			// Get payment state
+			$response = wp_remote_get(
+				$this->foopay_payment_api_url . '/api/v1/apps/' . $this->app_id . '/payments/referenceId:' . $order_id,
+				[
+					'timeout' => 20,
+					'headers' => [
+						'Authorization' => 'Bearer ' . $this->bot_token,
+					],
+				]
+			);
+
+			$staus_code = wp_remote_retrieve_response_code($response);
+			$body = json_decode(wp_remote_retrieve_body($response), true);
+
+			if ($staus_code == 200) {
+				$payment_state = $body['paymentState'] ?? '';
+				$new_order_status = $this->payment_state_handler(
+					$order_status,
+					$payment_state
+				);
+
+				if ($new_order_status == 'processing') {
+					$order->payment_complete();
+				} else {
+					$order->update_status($new_order_status, 'Payment state updated on thank you page.');
+				}
+			} else {
+				$this->log('Error in fetching payment details on thank you page', 'error', [
+					'status_code' => $staus_code,
+					'body' => $body
+				]);
+				return;
+			}
+		}
+
+		protected function webhook_token_generator($option_key, $settings)
+		{
+			$webhook_token = $settings['webhook_token'] ?? '';
+
+			if (empty($webhook_token)) {
 				$webhook_token = wp_generate_password(64, false);
+				$settings['webhook_token'] = $webhook_token;
 				update_option($option_key, $settings);
 			}
 
