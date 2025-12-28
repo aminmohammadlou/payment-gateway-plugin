@@ -421,8 +421,108 @@ function foopay_init_gateway_class()
 
 		public function payment_webhook_handler()
 		{
-			echo 'OK';
-			exit;
+			$this->log('Payment webhook received', 'info');
+
+			// Validate authorization header
+			$saved_settings = get_option('woocommerce_' . $this->id . '_settings', array());
+			$webhook_token = $saved_settings['webhook_token'] ?? '';
+
+			if (empty($webhook_token)) {
+				$this->log('Webhook token not set in DB', 'error');
+
+				status_header(400);
+				exit('Internal error');
+			}
+
+			$headers = getallheaders();
+			$auth_header = trim($headers['Authorization'] ?? '');
+			$token = preg_match('/^Bearer\s+(\S+)$/i', $auth_header, $m) ? $m[1] : '';
+
+			if (empty($token) || !hash_equals($webhook_token, $token)) {
+				$this->log('Invalid token in webhook request', 'error');
+				status_header(401);
+				exit('Unauthorized');
+			}
+
+			// Get data from request
+			$raw_body = file_get_contents('php://input');
+
+			if (empty($raw_body)) {
+				$this->log('Empty webhook body', 'error');
+
+				status_header(400);
+				exit('Empty body');
+			}
+
+			// Decode JSON
+			$data = json_decode($raw_body, true);
+
+			if (json_last_error() !== JSON_ERROR_NONE) {
+				$this->log('Invalid JSON in webhook', 'error');
+
+				status_header(400);
+				exit('Invalid JSON');
+			}
+
+			$order_id = $data['payment']['referenceId'] ?? '';
+
+			if (empty($order_id)) {
+				$this->log('Missing referenceId in webhook', 'error');
+
+				status_header(400);
+				exit('Missing referenceId');
+			}
+
+			$order = wc_get_order($order_id);
+			$order_status = $order->get_status();
+
+			// Get payment state
+			$response = wp_remote_get(
+				$this->foopay_payment_api_url . '/api/v1/apps/' . $this->app_id . '/payments/referenceId:' . $order_id,
+				[
+					'timeout' => 20,
+					'headers' => [
+						'Authorization' => 'Bearer ' . $this->bot_token,
+					],
+				]
+			);
+
+			$staus_code = wp_remote_retrieve_response_code($response);
+			$body = json_decode(wp_remote_retrieve_body($response), true);
+
+			if ($staus_code == 200) {
+				$this->log('Get payment from payment service successfully', 'info', [
+					'order_id' => $order_id,
+					'order_status' => $order_status,
+					'payment_state' => $body['paymentState'] ?? ''
+				]);
+
+				$payment_state = $body['paymentState'] ?? '';
+				$new_order_status = $this->payment_state_handler(
+					$order_status,
+					$payment_state
+				);
+
+				if ($new_order_status == 'processing') {
+					$order->payment_complete();
+				} else {
+					$order->update_status($new_order_status, 'Payment state updated on thank you page.');
+				}
+
+				$this->log('Order status updated', 'info', [
+					'order_id' => $order_id,
+					'order_status' => $order_status,
+					'new_order_status' => $new_order_status,
+					'payment_state' => $body['paymentState'] ?? ''
+				]);
+
+			} else {
+				$this->log('Error in fetching payment details on thank you page', 'error', [
+					'status_code' => $staus_code,
+					'body' => $body
+				]);
+				return;
+			}
 		}
 
 		protected function payment_state_handler($order_status, $payment_state)
