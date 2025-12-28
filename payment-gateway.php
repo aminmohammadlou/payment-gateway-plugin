@@ -166,8 +166,7 @@ function foopay_init_gateway_class()
 			$authorizationCode = isset($_GET['authorizationCode']) ? wp_unslash($_GET['authorizationCode']) : '';
 
 			$this->log('Starting setup process', 'info', [
-				'app_id' => $appId,
-				'authorization_code' => $authorizationCode
+				'app_id' => $appId
 			]);
 
 			// Validate params
@@ -265,9 +264,7 @@ function foopay_init_gateway_class()
 
 		protected function foopay_exchange_authorization_code_for_bot_token($authorization_code, $app_id)
 		{
-			$this->log('Starting exchange authorization code for bot token', 'info', [
-				'authorization_code' => $authorization_code,
-			]);
+			$this->log('Starting exchange authorization code for bot token', 'info');
 
 			// Call FooPay API to exchange code for token
 			$response = wp_remote_post(
@@ -298,9 +295,8 @@ function foopay_init_gateway_class()
 			$bot_token = trim($body);
 
 			if (empty($bot_token)) {
-				$this->log('Invalid bot token', 'error', [
-					'message' => 'Bot token is empty'
-				]);
+				$this->log('Bot token is empty', 'error');
+
 				return new WP_Error(
 					'Invalid bot token',
 					'Bot token is empty'
@@ -397,10 +393,8 @@ function foopay_init_gateway_class()
 			$body = json_decode(wp_remote_retrieve_body($response), true);
 
 			if ($staus_code === 201) {
-				$this->log('Payment created successfully', 'info', [
-					'status_code' => $staus_code,
-					'body' => $body
-				]);
+				$this->log('Payment created successfully. order_id: ' . $order_id, 'info');
+
 				$redirect_url = $body['redirectUrl'];
 
 				$order->update_status('on-hold', 'Pending payment in FooPay.');
@@ -410,10 +404,11 @@ function foopay_init_gateway_class()
 					'redirect' => $redirect_url,
 				);
 			} else {
-				$this->log('Error in creating payment in Foopay', 'error', [
+				$this->log('Error in creating payment', 'error', [
 					'status_code' => $staus_code,
 					'body' => $body
 				]);
+
 				wc_add_notice('Error in payment process', 'Call admin for support.');
 				return;
 			}
@@ -517,7 +512,7 @@ function foopay_init_gateway_class()
 				]);
 
 			} else {
-				$this->log('Error in fetching payment details on thank you page', 'error', [
+				$this->log('Error in fetching payment details', 'error', [
 					'status_code' => $staus_code,
 					'body' => $body
 				]);
@@ -561,9 +556,7 @@ function foopay_init_gateway_class()
 
 		public function thankyou_page_handler($order_id)
 		{
-			$this->log('Payment service redirected to thnak you page successfully', 'info', [
-				'order_id' => $order_id
-			]);
+			$this->log('Payment service redirected to thnak you page successfully. order_id: ' . $order_id, 'info');
 
 			$order = wc_get_order($order_id);
 			$order_status = $order->get_status();
@@ -609,7 +602,7 @@ function foopay_init_gateway_class()
 				]);
 
 			} else {
-				$this->log('Error in fetching payment details on thank you page', 'error', [
+				$this->log('Error in fetching payment details', 'error', [
 					'status_code' => $staus_code,
 					'body' => $body
 				]);
