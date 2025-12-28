@@ -461,6 +461,10 @@ function foopay_init_gateway_class()
 
 		public function thankyou_page_handler($order_id)
 		{
+			$this->log('Payment service redirected to thnak you page successfully', 'info', [
+				'order_id' => $order_id
+			]);
+
 			$order = wc_get_order($order_id);
 			$order_status = $order->get_status();
 
@@ -479,6 +483,12 @@ function foopay_init_gateway_class()
 			$body = json_decode(wp_remote_retrieve_body($response), true);
 
 			if ($staus_code == 200) {
+				$this->log('Get payment from payment service successfully', 'info', [
+					'order_id' => $order_id,
+					'order_status' => $order_status,
+					'payment_state' => $body['paymentState'] ?? ''
+				]);
+
 				$payment_state = $body['paymentState'] ?? '';
 				$new_order_status = $this->payment_state_handler(
 					$order_status,
@@ -490,6 +500,14 @@ function foopay_init_gateway_class()
 				} else {
 					$order->update_status($new_order_status, 'Payment state updated on thank you page.');
 				}
+
+				$this->log('Order status updated', 'info', [
+					'order_id' => $order_id,
+					'order_status' => $order_status,
+					'new_order_status' => $new_order_status,
+					'payment_state' => $body['paymentState'] ?? ''
+				]);
+
 			} else {
 				$this->log('Error in fetching payment details on thank you page', 'error', [
 					'status_code' => $staus_code,
