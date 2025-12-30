@@ -468,56 +468,7 @@ function foopay_init_gateway_class()
 				exit('Missing referenceId');
 			}
 
-			$order = wc_get_order($order_id);
-			$order_status = $order->get_status();
-
-			// Get payment state
-			$response = wp_remote_get(
-				$this->foopay_payment_api_url . '/api/v1/apps/' . $this->app_id . '/payments/referenceId:' . $order_id,
-				[
-					'timeout' => 20,
-					'headers' => [
-						'Authorization' => 'Bearer ' . $this->bot_token,
-					],
-				]
-			);
-
-			$staus_code = wp_remote_retrieve_response_code($response);
-			$body = json_decode(wp_remote_retrieve_body($response), true);
-
-			if ($staus_code == 200) {
-				$this->log('Get payment from payment service successfully', 'info', [
-					'order_id' => $order_id,
-					'order_status' => $order_status,
-					'payment_state' => $body['paymentState'] ?? ''
-				]);
-
-				$payment_state = $body['paymentState'] ?? '';
-				$new_order_status = $this->payment_state_handler(
-					$order_status,
-					$payment_state
-				);
-
-				if ($new_order_status == 'processing') {
-					$order->payment_complete();
-				} else {
-					$order->update_status($new_order_status, 'Payment state updated on thank you page.');
-				}
-
-				$this->log('Order status updated', 'info', [
-					'order_id' => $order_id,
-					'order_status' => $order_status,
-					'new_order_status' => $new_order_status,
-					'payment_state' => $body['paymentState'] ?? ''
-				]);
-
-			} else {
-				$this->log('Error in fetching payment details', 'error', [
-					'status_code' => $staus_code,
-					'body' => $body
-				]);
-				return;
-			}
+			$this->update_order_status($order_id);
 		}
 
 		protected function payment_state_handler($order_status, $payment_state)
@@ -554,10 +505,8 @@ function foopay_init_gateway_class()
 			}
 		}
 
-		public function thankyou_page_handler($order_id)
+		public function update_order_status($order_id)
 		{
-			$this->log('Payment service redirected to thnak you page successfully. order_id: ' . $order_id, 'info');
-
 			$order = wc_get_order($order_id);
 			$order_status = $order->get_status();
 
@@ -608,6 +557,13 @@ function foopay_init_gateway_class()
 				]);
 				return;
 			}
+		}
+
+		public function thankyou_page_handler($order_id)
+		{
+			$this->log('Payment service redirected to thnak you page successfully. order_id: ' . $order_id, 'info');
+
+			$this->update_order_status($order_id);
 		}
 
 		protected function webhook_token_generator($option_key, $settings)
