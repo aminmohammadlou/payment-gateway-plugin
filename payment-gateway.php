@@ -376,6 +376,27 @@ function foopay_init_gateway_class()
 		function process_payment($order_id)
 		{
 			$order = wc_get_order($order_id);
+
+			$payment_id = $order->get_meta('_payment_service_payment_id');
+			$redirect_url = $order->get_meta('_payment_service_redirect_url');
+
+			if ($payment_id && $redirect_url) {
+				$this->update_order_status($order_id);
+				$order_status = $order->get_status();
+
+				if ($order_status == 'failed') {
+					return [
+						'result' => 'failure',
+						'redirect' => $order->get_checkout_payment_url(),
+					];
+				}
+
+				return [
+					'result' => 'success',
+					'redirect' => $redirect_url,
+				];
+			}
+
 			$customer_id = $order->get_customer_id();
 
 			$this->log('Starting payment process. order_id: ' . $order_id, 'info');
@@ -461,6 +482,10 @@ function foopay_init_gateway_class()
 			if ($staus_code === 201) {
 				$this->log('Payment created successfully. order_id: ' . $order_id, 'info');
 
+				$order->update_meta_data('_payment_service_payment_id', $body['paymentId']);
+				$order->update_meta_data('_payment_service_redirect_url', $body['redirectUrl']);
+				$order->save();
+
 				$redirect_url = $body['redirectUrl'];
 
 				$order->update_status('on-hold', 'Pending payment in FooPay.');
@@ -529,10 +554,6 @@ function foopay_init_gateway_class()
 
 		protected function payment_state_handler($order_status, $payment_state)
 		{
-			if ($order_status === 'completed' || $order_status === 'cancelled' || $order_status === 'refunded' || $order_status === 'failed' || $order_status === 'processing') {
-				return $order_status;
-			}
-
 			switch ($payment_state) {
 				case 'Created':
 				case 'Authorized':
@@ -566,6 +587,10 @@ function foopay_init_gateway_class()
 			$order = wc_get_order($order_id);
 			$order_status = $order->get_status();
 
+			if ($order_status === 'completed' || $order_status === 'cancelled' || $order_status === 'refunded' || $order_status === 'failed' || $order_status === 'processing') {
+				return;
+			}
+
 			// Get payment state
 			$response = wp_remote_get(
 				$this->foopay_payment_api_url . '/api/v1/apps/' . $this->app_id . '/payments/referenceId:' . $order_id,
@@ -593,10 +618,14 @@ function foopay_init_gateway_class()
 					$payment_state
 				);
 
+				if ($order_status === $new_order_status) {
+					return;
+				}
+
 				if ($new_order_status == 'processing') {
 					$order->payment_complete();
 				} else {
-					$order->update_status($new_order_status, 'Payment state updated.');
+					$order->update_status($new_order_status, 'Order status updated.');
 				}
 
 				$this->log('Order status updated', 'info', [
