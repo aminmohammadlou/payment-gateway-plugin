@@ -64,10 +64,9 @@ function foopay_init_gateway_class()
 		protected string $foopay_panel_url = "https://admin-stage.payment-controller.com/auth/signin";
 		protected string $foopay_payment_app_url = "https://ezpin-payment-app-service-stage-ckbcd9ekc7bzcjfx.westus-01.azurewebsites.net";
 		protected string $foopay_payment_api_url = "https://api-stage.payment-controller.com";
-		protected string $sanbox_app_id;
-		protected string $sanbox_token;
-		protected string $live_app_id;
-		protected string $live_token;
+		protected string $app_id;
+		protected string $token;
+		protected string $webhook_token;
 
 		public function __construct()
 		{
@@ -84,14 +83,14 @@ function foopay_init_gateway_class()
 			$this->init_form_fields();
 			$this->init_settings(); // Load the settings
 
-			$this->sanbox_app_id = $this->get_option('sandbox_app_id');
-			$this->sanbox_token = $this->get_option('sandbox_token');
-			$this->live_app_id = $this->get_option('live_app_id');
-			$this->live_token = $this->get_option('live_token');
 			$this->title = $this->get_option('title');
 			$this->description = $this->get_option('description');
 			$this->enabled = $this->get_option('enabled');
+
 			$this->testmode = 'yes' === $this->get_option('testmode');
+			$this->app_id = $this->testmode ? $this->get_option('sandbox_app_id') : $this->get_option('live_app_id');
+			$this->token = $this->testmode ? $this->get_option('sandbox_token') : $this->get_option('live_token');
+			$this->webhook_token = $this->testmode ? $this->get_option('sandbox_webhook_token') : $this->get_option('live_webhook_token');
 
 			// Hook for saving settings
 			add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
@@ -179,12 +178,12 @@ function foopay_init_gateway_class()
 			$license_id = isset($_GET['licenseId']) ? wp_unslash($_GET['licenseId']) : '';
 			$authorization_code = isset($_GET['authorizationCode']) ? wp_unslash($_GET['authorizationCode']) : '';
 
-			$this->log('Starting setup process', 'info', [
-				'license_id' => $license_id
-			]);
+			$this->log('Starting setup process. LicenseId: ' . $license_id, 'info');
 
 			// Validate params
 			if (empty($authorization_code) || empty($license_id)) {
+				$this->log('LicenseId or AuthorizationCode is empty', 'error');
+
 				$this->foopay_render_admin_error_page(
 					'missing_parameters',
 					'authorizationCode and licenseId are required'
@@ -203,8 +202,10 @@ function foopay_init_gateway_class()
 			$settings['license_id'] = $license_id;
 			update_option($option_key, $settings);
 
-			// Get bot token
-			$app_detail = $this->get_bot_token(
+			$this->log('LicenseId saved', 'info');
+
+			// Get token
+			$app_detail = $this->get_token(
 				$license_id,
 				sanitize_text_field($authorization_code)
 			);
@@ -224,24 +225,24 @@ function foopay_init_gateway_class()
 			$settings['live_token'] = sanitize_text_field($app_detail['live_token']);
 			update_option($option_key, $settings);
 
-			// Set payment webhook in payment service
-			$sandbox_webhook_url = home_url('/?wc-api=sandbox_payment_webhook');
-			$sandbox_webhook_token = $this->webhook_token_generator($option_key, $settings, true);
-			$live_webhook_url = home_url('/?wc-api=live_payment_webhook');
-			$live_webhook_token = $this->webhook_token_generator($option_key, $settings, false);
+			$this->log('App details saved', 'info');
 
-			// sandbox
+			// Set payment webhook in payment service
+			$webhook_url = home_url('/?wc-api=payment_webhook');
+			$webhook_tokens = $this->webhook_token_generator($option_key, $settings);
+
+			// Sandbox
 			$this->set_payment_webhook_in_payment_service(
-				$sandbox_webhook_url,
-				$sandbox_webhook_token,
+				$webhook_url,
+				$webhook_tokens['sandbox_webhook_token'],
 				$app_detail['sandbox_app_id'],
 				$app_detail['sandbox_token']
 			);
 
-			// live
+			// Live
 			$this->set_payment_webhook_in_payment_service(
-				$live_webhook_url,
-				$live_webhook_token,
+				$webhook_url,
+				$webhook_tokens['live_webhook_token'],
 				$app_detail['live_app_id'],
 				$app_detail['live_token']
 			);
@@ -254,20 +255,22 @@ function foopay_init_gateway_class()
 			);
 
 			wp_safe_redirect($redirect_url);
+
+			$this->log('Setup completed successfully', 'info');
+
 			exit;
 		}
 
-		protected function get_bot_token($license_id, $authorization_code)
+		protected function get_token($license_id, $authorization_code)
 		{
-			$this->log('Start getting bot token', 'info');
+			$this->log('Start getting token', 'info');
 
 			$response = wp_remote_get(
 				$this->foopay_payment_app_url . '/api/licenses/' . $license_id,
 				array(
 					'timeout' => 20,
 					'headers' => array(
-						'Authorization' => 'Bearer ' . $authorization_code,
-						'Accept' => 'text/plain',
+						'Authorization' => 'Bearer ' . $authorization_code
 					),
 				)
 			);
@@ -276,7 +279,7 @@ function foopay_init_gateway_class()
 			$body = json_decode(wp_remote_retrieve_body($response), true);
 
 			if (is_wp_error($response) || $status_code !== 200) {
-				$this->log('Error in getting bot token', 'error', [
+				$this->log('Error in getting token', 'error', [
 					'status_code' => $status_code,
 					'body' => $body
 				]);
@@ -324,7 +327,7 @@ function foopay_init_gateway_class()
 
 		protected function set_payment_webhook_in_payment_service($webhook_url, $webhook_token, $app_id, $token)
 		{
-			$this->log('Start setting payment webhook in payment service.App: ' . $app_id, 'info');
+			$this->log('Start setting payment webhook in payment service. AppId: ' . $app_id, 'info');
 
 			$payload = [
 				'paymentWebhookUrl' => [
@@ -365,6 +368,8 @@ function foopay_init_gateway_class()
 				);
 				exit;
 			}
+
+			$this->log('webhook token set in payment service. AppId: ' . $app_id, 'info');
 		}
 
 		// Method that processes the payment
@@ -443,7 +448,7 @@ function foopay_init_gateway_class()
 				'timeout' => 30,
 				'headers' => array(
 					'Content-Type' => 'application/json',
-					'Authorization' => 'Bearer ' . $this->bot_token,
+					'Authorization' => 'Bearer ' . $this->token,
 				),
 				'body' => wp_json_encode($body),
 			);
@@ -479,22 +484,12 @@ function foopay_init_gateway_class()
 		{
 			$this->log('Payment webhook received', 'info');
 
-			// Validate authorization header
-			$saved_settings = get_option('woocommerce_' . $this->id . '_settings', array());
-			$webhook_token = $saved_settings['webhook_token'] ?? '';
-
-			if (empty($webhook_token)) {
-				$this->log('Webhook token not set in DB', 'error');
-
-				status_header(400);
-				exit('Internal error');
-			}
-
+			// Validate webhook token
 			$headers = getallheaders();
 			$auth_header = trim($headers['Authorization'] ?? '');
 			$token = preg_match('/^Bearer\s+(\S+)$/i', $auth_header, $m) ? $m[1] : '';
 
-			if (empty($token) || !hash_equals($webhook_token, $token)) {
+			if (empty($token) || !hash_equals($this->webhook_token, $token)) {
 				$this->log('Invalid token in webhook request', 'error');
 				status_header(401);
 				exit('Unauthorized');
@@ -577,7 +572,7 @@ function foopay_init_gateway_class()
 				[
 					'timeout' => 20,
 					'headers' => [
-						'Authorization' => 'Bearer ' . $this->bot_token,
+						'Authorization' => 'Bearer ' . $this->token,
 					],
 				]
 			);
@@ -601,7 +596,7 @@ function foopay_init_gateway_class()
 				if ($new_order_status == 'processing') {
 					$order->payment_complete();
 				} else {
-					$order->update_status($new_order_status, 'Payment state updated on thank you page.');
+					$order->update_status($new_order_status, 'Payment state updated.');
 				}
 
 				$this->log('Order status updated', 'info', [
@@ -627,17 +622,29 @@ function foopay_init_gateway_class()
 			$this->update_order_status($order_id);
 		}
 
-		protected function webhook_token_generator($option_key, $settings, $is_sandbox)
+		protected function webhook_token_generator($option_key, $settings)
 		{
-			$webhook_token = $is_sandbox ? $settings['sandbox_webhook_token'] ?? '' : $settings['live_webhook_token'] ?? '';
+			$sandbox_webhook_token = $settings['sandbox_webhook_token'] ?? '';
+			$live_webhook_token = $settings['live_webhook_token'] ?? '';
 
-			if (empty($webhook_token)) {
-				$webhook_token = wp_generate_password(64, false);
-				$is_sandbox ? $settings['sandbox_webhook_token'] = $webhook_token : $settings['live_webhook_token'] = $webhook_token;
+			if (empty($sandbox_webhook_token)) {
+				$sandbox_webhook_token = wp_generate_password(64, false);
+				$settings['sandbox_webhook_token'] = $sandbox_webhook_token;
 				update_option($option_key, $settings);
 			}
 
-			return $webhook_token;
+			if (empty($live_webhook_token)) {
+				$live_webhook_token = wp_generate_password(64, false);
+				$settings['live_webhook_token'] = $live_webhook_token;
+				update_option($option_key, $settings);
+			}
+
+			$this->log('webhook tokens saved', 'info');
+
+			return [
+				'sandbox_webhook_token' => $sandbox_webhook_token,
+				'live_webhook_token' => $live_webhook_token,
+			];
 		}
 
 		protected function foopay_render_admin_error_page($code, $message)
