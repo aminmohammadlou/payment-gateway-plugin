@@ -426,21 +426,21 @@ function foopay_init_gateway_class()
 							'state' => $order->get_billing_state(),
 							'country' => WC()->countries->countries[$order->get_billing_country()] ?? '',
 							'countryCode' => $order->get_billing_country(),
-						],
-						'orderId' => "$order_id",
-						'description' => sprintf('Order #%s from %s', $order->get_id(), get_bloginfo('name')),
-						'customId' => (string) $order->get_order_key(),
-						'amount' => [
-							'total' => (float) $order->get_total(),
-							'handling' => 0,
-							'insurance' => 0,
-							'discount' => (float) $order->get_total_discount(),
-							'shipping' => (float) $order->get_shipping_total(),
-							'shippingDiscount' => 0,
-							'totalTax' => (float) $order->get_total_tax(),
-						],
-						'items' => $items
-					]
+						]
+					],
+					'orderId' => "$order_id",
+					'description' => sprintf('Order #%s from %s', $order->get_id(), get_bloginfo('name')),
+					'customId' => (string) $order->get_order_key(),
+					'amount' => [
+						'total' => (float) $order->get_total(),
+						'handling' => 0,
+						'insurance' => 0,
+						'discount' => (float) $order->get_total_discount(),
+						'shipping' => (float) $order->get_shipping_total(),
+						'shippingDiscount' => 0,
+						'totalTax' => (float) $order->get_total_tax(),
+					],
+					'items' => $items
 				]
 			);
 
